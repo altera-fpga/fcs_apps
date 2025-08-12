@@ -21,14 +21,17 @@
 #include "sha2.h"
 
 #define FCS_CERT_HEADER_SZ	(sizeof(struct fcs_hps_generic_header))
+#define FCS_CERT_HEADER_1_5_SZ	(sizeof(struct fcs_hps_generic_header_1_5))
 
 #define CMF_AUTH_CERT_EFUSE	5
 #define CMF_AUTH_CERT_VAB	6
 
 #define BYTES_PER_WORD		(sizeof(uint32_t) / sizeof(uint8_t))
+#define BYTES_PER_TWO_WORDS		8
 #define CERT_LENGTH_SZ		BYTES_PER_WORD
-
+#define SDM_VAB_DEFAULT_MEASUREMENT_ATTRIBUTE 0x10
 #define OUTPUT_CERT_NAME	"unsigned_cert.ccert"
+#define OUTPUT_CERT_NAME_S15	"unsigned_cert-spec15.ccert"
 #define SIGNED_CERT_NAME	"signed_finished_cert.ccert"
 #define VAB_OUTPUT_FILENAME	"hps_image_signed.vab"
 
@@ -50,6 +53,7 @@ static const struct option opts[] = {
 	{"key_size", required_argument, NULL, 'x'},
 	{"key_usage", required_argument, NULL, 'u'},
 	{"gen_cs_key", required_argument, NULL, 'G'},
+	{"gen_cs_key_for_s15", required_argument, NULL, 'g'},
 	{"print_cs_key", required_argument, NULL, 'P'},
 	{"roothash", required_argument, NULL, 'r'},
 	{"finish", required_argument, NULL, 'F'},
@@ -75,30 +79,31 @@ static void fcs_prepare_usage(void)
 
 	printf("%-32s  %s", "-H|--hps_cert <HPS_image_filename>\n",
 	       "Create the unsigned certificate for an HPS VAB image.\n");
-	printf("  Output result is saved in filename = %s\n\n", OUTPUT_CERT_NAME);
+	printf("  Output result is saved in filenames = %s %s\n\n", OUTPUT_CERT_NAME, OUTPUT_CERT_NAME_S15);
 
 	printf("%-32s  %s  %s  %s  %s", "-C|--counter_set -s <counter_select> -c <counter_value>\n",
 	       "Create the unsigned certificate for a Counter Set command.\n",
 	       "if counter_set=1, set Big Counter to counter_value (range 0 to 495)\n",
 	       "if counter_set=2-5, set Security Version Counter to counter_value (range 0 to 64)\n",
 	       "if counter_value=-1 and counter_set=1-5, then can update the selected counter w/o signed certificate\n");
-	printf("  Output result is saved in filename = %s\n\n", OUTPUT_CERT_NAME);
+	printf("  Output result is saved in filenames = %s %s\n\n", OUTPUT_CERT_NAME, OUTPUT_CERT_NAME_S15);
 
 	printf("%-32s  %s  %s", "-K|--key -k|--key_type <user(0)/intel(1)> -i|--key_id <key_id> [-r|--roothash <filename>]\n",
 	       "Create the unsigned certificate for a Key Cancellation command.\n",
 	       "For User Key, roothash selects User Root Hash, Key ID can be 0 to 31.\n");
-	printf("  Output result is saved in filename = %s\n\n", OUTPUT_CERT_NAME);
+	printf("  Output result is saved in filenames = %s %s\n\n", OUTPUT_CERT_NAME, OUTPUT_CERT_NAME_S15);
 
 	printf("%-32s  %s  %s", "-F|--finish <signed_certificate> [-f|--imagefile <HPS_image_filename>]\n",
 	       "Concatentate the size to the certificate. If supplied, concatenate signed certficate to HPS VAB image.\n",
 	       "Output result is saved in filename = hps_image_signed.vab\n\n");
 
 	/* Crypto service key object helper */
-	printf("%-32s  %s  %s  %s  %s  %s  %s", "-G|--gen_cs_key <output_crypto_service_key_object_file>\n",
+	printf("%-32s  %s", "-G|--gen_cs_key <output_crypto_service_key_object_file>\n", "Or for SPEC1.5 platforms\n");
+	printf("%-32s  %s  %s  %s  %s  %s  %s", "-g|--gen_cs_key_for_s15 <output_crypto_service_key_object_file>\n",
 	       "-i|--key_id <non-zero unique id>\n",
 	       "-x|--key_size <128|256|384|512>\n",
 	       "-k|--key_type <AES(1)/HMAC(2)/ECC NIST P Curve(3)/ECC-BrainPool(4)>\n",
-	       "-u|--key_usage <key usage bitmask. Encrypt(b0)|Decrypt(b1)|Sign(b2)|Verify(b3)|Exchange(b4)>\n",
+	       "-u|--key_usage <key usage bitmask. Encrypt(b0)|Decrypt(b1)|Sign(b2)|Verify(b3)|Exchange(b4)>|IV source(b29:b30)|GCM(b31)\n",
 	       "-t|--textfile <text file contains key data in hexadecimal>\n",
 	       "Generate unprotected crypto service key object file.\n\n");
 	printf("%-32s  %s", "-P|--print_cs_key <crypto_service_key_object_file>\n",
@@ -222,8 +227,8 @@ static int fcs_finish_cert(char *cert_filename, char *image_filename, bool verbo
 		}
 		image_sz = st.st_size;
 		/* filesize must be on a word boundary */
-		if (image_sz % BYTES_PER_WORD) {
-			pad = BYTES_PER_WORD - (image_sz % BYTES_PER_WORD);
+		if (image_sz % BYTES_PER_TWO_WORDS) {
+			pad = BYTES_PER_TWO_WORDS - (image_sz % BYTES_PER_TWO_WORDS);
 			printf("%s[%d] filesize not on word boundary. Padding with %d bytes\n",
 				__func__, __LINE__, pad);
 		}
@@ -317,6 +322,8 @@ static int fcs_generate_cert(uint32_t cert_type, void *data, size_t data_sz)
 {
 	struct fcs_hps_generic_header *fcs_vab_cert;
 	FILE *fpo;
+	struct fcs_hps_generic_header_1_5 *fcs_vab_cert_1_5;
+	struct fcs_hps_vab_certificate_1_5_data *fcs_vab_cert_1_5_data;
 
 	/* Allocate a buffer for the certificate */
 	fcs_vab_cert = calloc(FCS_CERT_HEADER_SZ, sizeof(uint8_t));
@@ -342,6 +349,36 @@ static int fcs_generate_cert(uint32_t cert_type, void *data, size_t data_sz)
 	}
 	fwrite(fcs_vab_cert, 1, FCS_CERT_HEADER_SZ, fpo);
 	fclose(fpo);
+
+	/* Add support for SDM SPEC1.5 for new platforms */
+	if (cert_type == CMF_AUTH_CERT_VAB) {
+		fcs_vab_cert_1_5 = calloc(FCS_CERT_HEADER_1_5_SZ, sizeof(uint8_t));
+		fcs_vab_cert_1_5->cert_magic_num = SDM_CERT_MAGIC_NUM;
+		fcs_vab_cert_1_5->cert_data_sz = FCS_CERT_HEADER_1_5_SZ;
+		fcs_vab_cert_1_5->cert_ver = 1;
+		fcs_vab_cert_1_5->cert_type = cert_type;
+		memcpy(fcs_vab_cert_1_5->fcs_data, data, data_sz);
+		fcs_vab_cert_1_5_data = (struct fcs_hps_vab_certificate_1_5_data *)fcs_vab_cert_1_5->fcs_data;
+		fcs_vab_cert_1_5_data->vab_magic_num = VAB_CERT_MAGIC_NUM;
+		fcs_vab_cert_1_5_data->measurement_attr = SDM_VAB_DEFAULT_MEASUREMENT_ATTRIBUTE;
+	}
+		
+
+	fpo = fopen(OUTPUT_CERT_NAME_S15, "wbx");
+	if (!fpo) {
+		fprintf(stderr, "Unable to open file %s:  %s\n",
+			OUTPUT_CERT_NAME_S15, strerror(errno));
+		free(fcs_vab_cert);
+		return -1;
+	}
+	if (cert_type == CMF_AUTH_CERT_VAB) {
+		fwrite(fcs_vab_cert_1_5, 1, FCS_CERT_HEADER_1_5_SZ, fpo);
+	} else {
+		fcs_vab_cert->cert_ver = 1;
+		fwrite(fcs_vab_cert, 1, FCS_CERT_HEADER_SZ, fpo);
+	}
+	fclose(fpo);
+
 	free(fcs_vab_cert);
 
 	return 0;
@@ -394,8 +431,8 @@ static int fcs_prepare_image(char *filename, int fcs_type, bool verbose)
 				filesize, filesize);
 
 		/* filesize must be on a word boundary */
-		if (filesize % BYTES_PER_WORD) {
-			pad = BYTES_PER_WORD - (filesize % BYTES_PER_WORD);
+		if (filesize % BYTES_PER_TWO_WORDS) {
+			pad = BYTES_PER_TWO_WORDS - (filesize % BYTES_PER_TWO_WORDS);
 
 			printf("%s[%d] filesize not on word boundary. Padding with %d bytes\n",
 				__func__, __LINE__, pad);
@@ -450,7 +487,7 @@ static int fcs_prepare_image(char *filename, int fcs_type, bool verbose)
 		free(hps_buff);
 
 		/* Populate the rest of the structure */
-		fcs_data.rsvd0_0 = 0;
+		fcs_data.vab_magic_num = 0;
 		fcs_data.flags = 0;
 
 		ret = fcs_generate_cert(CMF_AUTH_CERT_VAB, &fcs_data, VAB_DATA_SZ);
@@ -584,6 +621,7 @@ static int fcs_prepare_key(int key_type, int key_id,
  * @key_size: 128 | 256 | 384 | 512 bits
  * @key_type: AES(1)/HMAC(2)/ECC NIST P Curve(3)/ECC-BrainPool(4)
  * @key_usage: bitmask (b0:Encrypt | b1:Decrypt | b2:Sign | b3:Verify | b4:Exchange)
+ * @key_obj_ver: key object version
  * @key_data_file: Text file that contains key data in hexadecimal
  * @key_obj_file: Output binary crypto service key object file
  * @verbose: If true, print verbose output
@@ -592,7 +630,7 @@ static int fcs_prepare_key(int key_type, int key_id,
  *
  */
 static int fcs_prepare_generate_cs_key_object(unsigned int key_id, int key_size,
-			   unsigned int key_type, unsigned int key_usage,
+			   unsigned int key_type, unsigned int key_usage, unsigned int key_obj_ver,
 			   char *key_data_file, char *key_obj_file, bool verbose)
 {
 	int ret = -1;
@@ -625,17 +663,20 @@ static int fcs_prepare_generate_cs_key_object(unsigned int key_id, int key_size,
 		return ret;
 	}
 
-	/* @key_usage: bitmask (b0:Encrypt | b1:Decrypt | b2:Sign | b3:Verify | b4:Exchange) */
+	/* @key_usage: bitmask (b0:Encrypt | b1:Decrypt | b2:Sign | b3:Verify | b4:Exchange)
+	 * (b29:30): IV Source
+	 * b31: GCM
+	 */
 	switch (key_type) {
 	case 1:
-		key_usage_mask &= ~(0x3);
+		key_usage_mask &= ~(0xC0000003);
 		if (key_size != 128 && key_size != 256) {
 			printf("Mismatch between key type and key size\n");
 			return ret;
 		}
 		break;
 	case 2:
-		key_usage_mask &= ~(0xC);
+		key_usage_mask &= ~(0x1C);
 		if (key_size != 256 && key_size != 384 && key_size != 512) {
 			printf("Mismatch between key type and key size\n");
 			return ret;
@@ -665,7 +706,23 @@ static int fcs_prepare_generate_cs_key_object(unsigned int key_id, int key_size,
 	object.key_id = key_id;
 	object.key_type = key_type;
 	object.key_usage = key_usage;
-	object.key_size = key_size;
+	/* key size definition
+	 * 0x00 Invalid Key Size
+	 * 0x01 128 bit key
+	 * 0x02 256 bit key
+	 * 0x03 384 bit key
+	 * 0x04 512 bit key
+	 */
+	object.key_size = key_size / 128;
+	object.key_obj_ver = key_obj_ver;
+	/* Owner ID: for future using, is reserved as 0 */
+	object.key_owner_id = 0;
+	/* User ID: for future using, is reserved as 0 */
+	object.key_user_id = 0;
+
+	/* FIPS mode and Condition Data Length are introducted by SPEC1.5 */
+	object.key_fips_mode = 0;
+	object.key_con_length = 0;
 
 	/* Read key data from key_data_file */
 	fpi = fopen(key_data_file, "r");
@@ -837,12 +894,12 @@ int main(int argc, char *argv[])
 	bool verbose = false;
 	char *filename = NULL, *hpsfile =  NULL, *textfile = NULL;
 	unsigned int key_id = -1, key_usage = 0;
-	int key_type = -1, key_size = 0;
+	int key_type = -1, key_size = 0, key_obj_ver = 0;
 	int counter_val = -1, counter_sel = -1;
 	int index = 0, type = 0;
 	int c;
 
-	while ((c = getopt_long(argc, argv, "hvH:CKc:i:k:r:s:F:f:G:P:x:u:t:",
+	while ((c = getopt_long(argc, argv, "hvH:CKc:i:k:r:s:F:f:G:g:P:x:u:t:",
 				opts, &index)) != -1) {
 		switch (c) {
 		case 'H':
@@ -871,6 +928,12 @@ int main(int argc, char *argv[])
 			break;
 		case 'G':
 			filename = optarg;
+			key_obj_ver = 0;
+			type = FCS_CMD_TYPE_GEN_CS_KEY_OBJ;
+			break;
+		case 'g':
+			filename = optarg;
+			key_obj_ver = 1;
 			type = FCS_CMD_TYPE_GEN_CS_KEY_OBJ;
 			break;
 		case 'P':
@@ -980,7 +1043,7 @@ int main(int argc, char *argv[])
 
 	} else if (type == FCS_CMD_TYPE_GEN_CS_KEY_OBJ) {
 		if (fcs_prepare_generate_cs_key_object(key_id, key_size,
-			key_type, key_usage, textfile, filename, verbose)) {
+			key_type, key_usage, key_obj_ver, textfile, filename, verbose)) {
 			error_exit("Fail to generate crypto service key object file.");
 		}
 

@@ -61,21 +61,26 @@ int fcs_cs_key_object_encode(struct fcs_cs_key_object_data *object, uint8_t *buf
 	i++;
 	/* key object size (index = 1), this will be filled in at the end */
 	buffer_u32[i] = 0;
+	/* Key Object Version */
+	buffer_u32[i] |= (uint32_t)(object->key_obj_ver) << 16;
+	/* Key FIPS mode */
+	buffer_u32[i] |= (uint32_t)(object->key_fips_mode) << 24;
+
 	i++;
 	/* key unique id */
 	buffer_u32[i] = object->key_id;
 	i++;
 	/* key owner id */
-	buffer_u32[i] = 0;
+	buffer_u32[i] = object->key_owner_id;
 	i++;
 	/* key user id */
-	buffer_u32[i] = 0;
+	buffer_u32[i] = object->key_user_id;
 	i++;
 	/* key protection (0x00), wrapped key vertion, key size, key type */
 	buffer_u32[i] = 0;
 	buffer_u32[i] |= (uint32_t)(object->key_protection);
 	buffer_u32[i] |= (uint32_t)(object->key_wrap_version) << 8;
-	buffer_u32[i] |= (uint32_t)((object->key_size / 128)) << 16;
+	buffer_u32[i] |= (uint32_t)((object->key_size)) << 16;
 	buffer_u32[i] |= (uint32_t)(object->key_type) << 24;
 	i++;
 	/* Key Usage */
@@ -83,33 +88,46 @@ int fcs_cs_key_object_encode(struct fcs_cs_key_object_data *object, uint8_t *buf
 	i++;
 	/*
 	 * Usage Condition Data Length
-	 * always 0 and it is not supported in this version
+	 * using 0 now and it is supported from SDM SPEC1.5
 	 */
-	buffer_u32[i] = 0;
+	buffer_u32[i] = object->key_con_length;
 	i++;
 	/* Usage Condition Data is not supported in this version */
 	/* IV used in Key Protection */
-	memcpy(&(buffer[i*4]), object->iv, FCS_CS_KEY_IV_MAX_SZ);
-	i += (FCS_CS_KEY_IV_MAX_SZ / 4);
+	if (object->key_obj_ver == 0) {
+		memcpy(&(buffer[i*4]), object->iv, FCS_CS_KEY_IV_MAX_SZ);
+		i += (FCS_CS_KEY_IV_MAX_SZ / 4);
+	} else {
+		memcpy(&(buffer[i*4]), object->iv, FCS_CS_KEY_IV_MAX_SZ_S15);
+		i += (FCS_CS_KEY_IV_MAX_SZ_S15 / 4);
+	}
 	/* Key Data Magic Word */
 	buffer_u32[i] = FCS_CS_KEY_OBJECT_DATA_MAGIC_WORD;
 	i++;
+
+	/* Reserved from SPEC 1.5 */
+	if (object->key_obj_ver == 1)
+		i++;
 	/*
 	 * Key Data, must be 32 bytes aligned
 	 * padded with 0s to 32 bytes boundary
 	 */
-	byte_size = (object->key_size / 8);
+	byte_size = (object->key_size * 128 / 8);
 	if (byte_size % 32 != 0) {
 		byte_size += (32 - (byte_size % 32));
 	}
 	memset(&(buffer[i*4]), 0, byte_size);
-	memcpy(&(buffer[i*4]), object->data, (object->key_size / 8));
+	memcpy(&(buffer[i*4]), object->data, (object->key_size * 128 / 8));
 	i += (byte_size / 4);
-	/* MAC - not required in unprotected key */
 	/* Last, fill in final key object size */
-
 	*size = i * 4;
 	buffer_u32[1] |= *size & 0xFFFF;
+	/* MAC - not required in unprotected key */
+	memset(&(buffer[i*4]), 0, FCS_CS_KEY_MAC_MAX_SZ);
+	i += (FCS_CS_KEY_MAC_MAX_SZ / 4);
+
+	/* The whole buffer size should include MAC, but key_obj_size shouldn't */
+	*size = i * 4;
 
 	return 0;
 }
@@ -151,6 +169,11 @@ int fcs_cs_key_object_decode(struct fcs_cs_key_object_data *object, uint8_t *buf
 		printf("Key object size %d is not 32 bits misaligned\n", key_object_size);
 		return -1;
 	}
+	/* Key Object Version */
+	object->key_obj_ver  = (buffer_u32[i] >> 16) & 0xFF;
+	/* Key FIPS mode */
+	object->key_fips_mode  = (buffer_u32[i]>> 24) & 0xFF;
+
 	i++;
 	/* key unique id */
 	if (buffer_u32[i] == 0) {
@@ -160,40 +183,48 @@ int fcs_cs_key_object_decode(struct fcs_cs_key_object_data *object, uint8_t *buf
 	object->key_id = buffer_u32[i];
 	i++;
 	/* key owner id */
+	object->key_owner_id = buffer_u32[i];
 	i++;
 	/* key user id */
+	object->key_user_id = buffer_u32[i];
 	i++;
 	/* key protection (0x00), wrapped key vertion, key size, key type */
 	object->key_protection = buffer_u32[i] & 0xFF;
 	object->key_wrap_version = (buffer_u32[i] >> 8) & 0xFF;
-	object->key_size = ((buffer_u32[i] >> 16) & 0xFF) * 128;
+	object->key_size = ((buffer_u32[i] >> 16) & 0xFF);
 	object->key_type = (buffer_u32[i] >> 24) & 0xFF;
 	i++;
 	/* Key Usage */
 	object->key_usage = buffer_u32[i];
 	i++;
 	/* Usage Condition Data Length */
-	if (buffer_u32[i] != 0) {
-		printf("Usage condition data is not supported in this version.\n");
-		return -1;
-	}
+	object->key_con_length = buffer_u32[i];
 	i++;
 	/* Usage Condition Data - future */
 	/* IV used in Key Protection */
-	memcpy(object->iv, &(buffer[i*4]), FCS_CS_KEY_IV_MAX_SZ);
-	i += (FCS_CS_KEY_IV_MAX_SZ / 4);
+	if (object->key_obj_ver == 0) {
+		memcpy(object->iv, &(buffer[i*4]), FCS_CS_KEY_IV_MAX_SZ);
+		i += (FCS_CS_KEY_IV_MAX_SZ / 4);
+	} else {
+		memcpy(object->iv, &(buffer[i*4]), FCS_CS_KEY_IV_MAX_SZ_S15);
+		i += (FCS_CS_KEY_IV_MAX_SZ_S15 / 4);
+	}
 	/* Key Data Magic Word */
 	if (buffer_u32[i] != FCS_CS_KEY_OBJECT_DATA_MAGIC_WORD) {
 		printf("Invalid key object data magic word\n");
 		return -1;
 	}
 	i++;
+
+	/* Reserved from SPEC 1.5 */
+	if (object->key_obj_ver == 1)
+		i++;
 	/* Key Data, must be 32 bytes aligned, padded with 0s to 32 bytes boundary */
-	byte_size = (object->key_size / 8);
+	byte_size = (object->key_size * 128 / 8);
 	if (byte_size % 32 != 0) {
 		byte_size += (32 - (byte_size % 32));
 	}
-	memcpy(object->data, &(buffer[i*4]), (object->key_size / 8));
+	memcpy(object->data, &(buffer[i*4]), (object->key_size * 128 / 8));
 	i += (byte_size / 4);
 	/* MAC */
 	if ((i * 4) < key_object_size) {
@@ -223,7 +254,7 @@ int fcs_cs_key_object_decode(struct fcs_cs_key_object_data *object, uint8_t *buf
  */
 int fcs_cs_key_object_print(struct fcs_cs_key_object_data *object)
 {
-	int i;
+	int i, iv_sz;
 
 	if (object == NULL) {
 		return -1;
@@ -233,12 +264,16 @@ int fcs_cs_key_object_print(struct fcs_cs_key_object_data *object)
 	printf("    key_id              0x%08x\n", object->key_id);
 	printf("    key_type            %d (1:AES, 2:HMAC, 3:ECC NIST P Curve, 4:ECC-BrainPool)\n", object->key_type);
 	printf("    key_usage           0x%08x (B0:Enc, B1:Dec, B2:Sign, B3:Verify, B4:Exchange)\n", object->key_usage);
-	printf("    key_size            %d bits\n", object->key_size);
+	printf("    key_size            %d bits\n", object->key_size * 128);
+	printf("    key_object_version  %d \n", object->key_obj_ver);
+	printf("    key_fips_mode	%d \n", object->key_fips_mode);
+	printf("    key_owner_id	%d \n", object->key_owner_id);
+	printf("    key_user_id		%d \n", object->key_user_id);
 	printf("    key_protection      %d\n", object->key_protection);
 	printf("    key_wrap_version    %d\n", object->key_wrap_version);
 
 	printf("    data          ");
-	for (i = 0; i < (object->key_size/8); i++) {
+	for (i = 0; i < (object->key_size * 128 / 8); i++) {
 		if (i & 0xf) {
 			printf(" %02x", object->data[i]);
 		} else {
@@ -248,7 +283,12 @@ int fcs_cs_key_object_print(struct fcs_cs_key_object_data *object)
 	printf("\n");
 
 	printf("    iv            ");
-	for (i = 0; i < FCS_CS_KEY_IV_MAX_SZ; i++) {
+	if (object->key_obj_ver == 0)
+		iv_sz = FCS_CS_KEY_IV_MAX_SZ;
+	else
+		iv_sz = FCS_CS_KEY_IV_MAX_SZ_S15;
+
+	for (i = 0; i < iv_sz; i++) {
 		if (i & 0xf) {
 			printf(" %02x", object->iv[i]);
 		} else {

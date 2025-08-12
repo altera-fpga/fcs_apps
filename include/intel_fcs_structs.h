@@ -17,11 +17,14 @@
 #define FCS_CMD_TYPE_PRINT_CS_KEY_OBH	5
 
 #define SDM_CERT_MAGIC_NUM	0x25D04E7F
+/* New VAB Certificate Magic Number from SDM SPEC 1.5 */
+#define VAB_CERT_MAGIC_NUM	0x52619311
 
 #define SHA256_SZ		32
 #define SHA384_SZ		48
 #define FCS_MAX_COUNTERS	5
 #define VAB_DATA_SZ		64
+#define VAB_1_5_DATA_SZ		72
 
 #define FCS_USER_KEY		0
 #define FCS_INTEL_KEY		1
@@ -35,6 +38,7 @@
 /* Crypto service key object */
 #define FCS_CS_KEY_DATA_MAX_SZ			128
 #define FCS_CS_KEY_IV_MAX_SZ			12
+#define FCS_CS_KEY_IV_MAX_SZ_S15		16
 #define FCS_CS_KEY_MAC_MAX_SZ			48
 #define FCS_CS_KEY_OBJECT_MAX_SZ		352
 
@@ -60,6 +64,15 @@ struct fcs_hps_generic_header {
 	/* keychain starts at offset 0x50 */
 };
 
+struct fcs_hps_generic_header_1_5 {
+	uint32_t cert_magic_num;		/* offset 0 */
+	uint32_t cert_data_sz;
+	uint32_t cert_ver;
+	uint32_t cert_type;
+	uint8_t  fcs_data[VAB_1_5_DATA_SZ];		/* offset 0x20 */
+	/* keychain starts at offset 0x50 */
+};
+
 /*
  * struct fcs_hps_vab_certificate_data
  * @flags: Reserved for future use.
@@ -67,10 +80,19 @@ struct fcs_hps_generic_header {
  * @cert_sign_keychain: Certificate Signing Keychain
  */
 struct fcs_hps_vab_certificate_data {
-	uint32_t rsvd0_0;			/* offset 0x10 */
+	uint32_t vab_magic_num;			/* offset 0x10 */
 	uint32_t flags;
 	uint8_t  rsvd0_1[8];
 	uint8_t  fcs_sha384[SHA384_SZ];		/* offset 0x20 */
+};
+
+struct fcs_hps_vab_certificate_1_5_data {
+	uint32_t vab_magic_num;			/* offset 0x10 */
+	uint32_t flags;
+	uint8_t  rsvd0[8];
+	uint8_t  fcs_sha384[SHA384_SZ];		/* offset 0x20 */
+	uint32_t  measurement_attr;
+	uint8_t  rsvd1[4];
 };
 
 /*
@@ -360,27 +382,48 @@ struct fcs_aes_encrypt_buffer {
 };
 
 /*
- * struct fcs_cs_key_object_data
- * @key_id: Non-zero unique key id.
- * @key_size: 128 | 256 | 384 | 512 bits
- * @key_type: AES(1)/HMAC(2)/ECC NIST P Curve(3)/ECC-BrainPool(4)
- * @key_usage: bitmask (b0:Encrypt | b1:Decrypt | b2:Sign | b3:Verify | b4:Exchange)
- * @key_protection: Unprotected(0)/BootDIMK(1)/User IID PUF(2)/Intel IID PUF(3)
+ * the key object struct complied with SDM SPEC1.5
+ * struct fcs_cs_key_object_data_s15 
+ * @key_magic_id: Magic Number Word.
+ * @key_obj_size: Size of key object starting from Magic word to MAC data
+ * @key_obj_ver: Version of key object, default is 0x01, 0 for ND/FM, 1 for SM
+ * @key_fips_mode: FIPS mode
+ * @key_id: Key Unique ID
+ * @key_owner_id: Key Owner ID
+ * @key_user_id: Key user ID
+ * @key_protection: Unprotected(0)/BootDIMK(1)/User IID PUF(2)/UDS IID PUF(3)
+ *                  Intel PUF(4)
  * @key_wrap_version: Wrapping Key security version if key protection field is 0x1
- * @data: Key data
+ * @key_size: 128(0x1) | 256(0x2) | 384(0x3) | 512(0x4) bits
+ * @key_type: AES(1)/HMAC(2)/ECC NIST P Curve(3)/ECC-BrainPool(4)/Reserved(5-0xFF)
+ * @key_usage: bitmask (b0:Encrypt | b1:Decrypt | b2:Sign | b3:Verify | b4:Exchange
+ * 			b5-28: reserved | b29-30: GCM IV mode | b31: GCM mode)
+ * @key_con_length: Usage Condition Data Length
  * @iv: IV used in key protection. All 0 in unprotected key.
+ * @key_data_magic_word: Magic word used for key data alignment
+ * @key_reserved: Reserved
+ * @data: Key data
  * @mac: Algorithm uses HMAC-384 for wrapped key. All 0 in unprotected key.
  */
 struct fcs_cs_key_object_data {
-	uint32_t key_id;
-	uint32_t key_size;
-	uint8_t key_type;
-	uint32_t key_usage;
-	uint8_t key_protection;
-	uint8_t key_wrap_version;
-	uint8_t data[FCS_CS_KEY_DATA_MAX_SZ];
-	uint8_t iv[FCS_CS_KEY_IV_MAX_SZ];
-	uint8_t mac[FCS_CS_KEY_MAC_MAX_SZ];
+	uint32_t	key_magic_id;
+	uint16_t	key_obj_size;
+	uint8_t		key_obj_ver;
+	uint8_t		key_fips_mode;
+	uint32_t	key_id;
+	uint32_t	key_owner_id;
+	uint32_t	key_user_id;
+	uint8_t		key_protection;
+	uint8_t		key_wrap_version;
+	uint8_t		key_size;
+	uint8_t		key_type;
+	uint32_t	key_usage;
+	uint32_t	key_con_length;
+	uint8_t		iv[FCS_CS_KEY_IV_MAX_SZ_S15];
+	uint32_t	key_data_magic_word;
+	uint32_t	reserved;
+	uint8_t		data[FCS_CS_KEY_DATA_MAX_SZ];
+	uint8_t		mac[FCS_CS_KEY_MAC_MAX_SZ];
 };
 
 /*

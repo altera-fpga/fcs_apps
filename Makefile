@@ -16,7 +16,7 @@ NETTLE_OBJ := $(NETTLE_SRC:$(NETTLE_SRC_DIR)/%.c=$(NETTLE_OBJ_DIR)/%.o)
 
 CPP_FLAGS := -Iinclude -Inettle/include
 CFLAGS := -Wall
-LDFLAGS := -static
+LDFLAGS :=
 
 .PHONY: all clean
 
